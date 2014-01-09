@@ -26,6 +26,7 @@
 #include <string>
 #include <stdint.h>
 #include <map>
+#include <set>
 #include <rados/librados.h>
 /*----------------------------------------------------------------------------*/
 #include "XrdCms/XrdCmsClient.hh"
@@ -42,7 +43,6 @@
 
 typedef struct {
   std::string name;
-  int size;
   rados_ioctx_t ioctx;
 } RadosCmsPool;
 
@@ -73,9 +73,9 @@ public:
   //--------------------------------------------------------------------------
   /**
    * @brief load the configuration variables from a configuration file
-   * @param pluginConf config file name
-   * @param configPath path configuration
-   * @param userName username configuration
+   * @param pluginConf XRootD config file name
+   * @param configPath path to ceph configuration file
+   * @param userName ceph username 
    * @return 0 on success
    */
   //--------------------------------------------------------------------------
@@ -83,6 +83,15 @@ public:
                   std::string &configPath,
                   std::string &userName);
 
+  
+  /**
+   * @brief add a pool from a configuration string
+   *
+   *  * @param confStr
+   */
+  
+  void AddPoolFromConfStr(const char *confStr);
+  
   //--------------------------------------------------------------------------
   //! Locate() is called to retrieve file location information. It is only used
   //!        on a manager node. This can be the list of servers that have a
@@ -150,9 +159,12 @@ private:
 
   XrdSysMutex mOsdMapMutex; ///< mutex for the osd map
 
-  pthread_t mOsdMapThread; //< thread dumping regulary the osdmap;
-  std::string mRadosUser; //< name of the rados user used for dumping
+  pthread_t mOsdMapThread; ///< thread dumping regulary the osdmap;
+  std::string mRadosUser; ///< name of the rados user used for dumping
 
+  std::map<std::string, RadosCmsPool> mPoolMap; ///< map from prefix to pool rados pool
+  std::set<std::string> mPoolPrefixSet; ///< set with all prefix
+   
   //--------------------------------------------------------------------------
   /**
    * @brief run the CEPH command to dump the currently valid Osd map

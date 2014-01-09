@@ -26,6 +26,10 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 /*----------------------------------------------------------------------------*/
 #include "RadosCms.hh"
 /*----------------------------------------------------------------------------*/
@@ -36,9 +40,17 @@
 #include "XrdSys/XrdSysTimer.hh"
 #include "XrdOuc/XrdOucTrace.hh"
 #include "XrdOuc/XrdOucEnv.hh"
+#include "XrdOuc/XrdOucStream.hh"
 #include "XrdOuc/XrdOucString.hh"
 #include "XrdOuc/XrdOucTokenizer.hh"
 /*----------------------------------------------------------------------------*/
+
+#define RADOS_CMS_CONFIG_PREFIX "radoscms"
+#define RADOS_CONFIG (RADOS_CMS_CONFIG_PREFIX ".config")
+#define RADOS_CONFIG_POOLS_KW (RADOS_CMS_CONFIG_PREFIX ".pools")
+#define RADOS_CONFIG_USER (RADOS_CMS_CONFIG_PREFIX ".user")
+#define DEFAULT_POOL_PREFIX "/"
+#define LOG_PREFIX "--- Ceph Cms Rados --- "
 
 // Singleton variable
 static XrdCmsClient* instance = NULL;
@@ -97,12 +109,7 @@ mRedirPort (1094)
   mRedirHost.clear();
   mOsdDumpFile = "/var/tmp/xrootd-rados-cms.osd.dump";
   mRadosUser = "atlassfst";
-
-  XrdSysThread::Run(&mOsdMapThread,
-                    RadosCms::StaticOsdMapThread,
-                    static_cast<void *> (this),
-                    XRDSYSTHREAD_HOLD,
-                    "OsdMap Thread");
+  mOsdMapThread = 0;
 }
 
 
@@ -115,6 +122,7 @@ RadosCms::~RadosCms ()
   if (mOsdMapThread)
   {
     XrdSysThread::Cancel(mOsdMapThread);
+    fprintf(stderr,"trying to join\n");
     XrdSysThread::Join(mOsdMapThread, NULL);
     mOsdMapThread = 0;
   }
@@ -129,10 +137,26 @@ int
 RadosCms::Configure (const char* cfn, char* params, XrdOucEnv* EnvInfo)
 {
   RadosCmsError.Emsg("Configure", "Init RadosCms plugin with params:", params);
-  
+
   std::string path;
   std::string user;
-  return !LoadConfig(cfn, path, user);
+  int retc = !LoadConfig(cfn, path, user);
+  
+  if (!mPoolMap.size())
+  {
+    RadosCmsError.Emsg("Configure", 
+                       "your pool map is empty! Define 'radoscms.pools=...'");
+    return 0;
+  }
+  
+  XrdSysThread::Run(&mOsdMapThread,
+                    RadosCms::StaticOsdMapThread,
+                    static_cast<void *> (this),
+                    XRDSYSTHREAD_HOLD,
+                    "OsdMap Thread");
+  
+  return retc;
+  
 }
 
 //------------------------------------------------------------------------------
@@ -141,12 +165,67 @@ RadosCms::Configure (const char* cfn, char* params, XrdOucEnv* EnvInfo)
 
 int
 RadosCms::LoadConfig (const char *pluginConf,
-            std::string &configPath,
-            std::string &userName)
+                      std::string &configPath,
+                      std::string &userName)
 {
-  return 0;
+  XrdOucStream Config;
+  int cfgFD;
+  char *var;
+
+  configPath = "";
+  userName = "";
+
+  if ((cfgFD = open(pluginConf, O_RDONLY, 0)) < 0)
+    return cfgFD;
+
+  Config.Attach(cfgFD);
+  while ((var = Config.GetMyFirstWord()))
+  {
+    if (configPath == "" && strcmp(var, RADOS_CONFIG) == 0)
+    {
+      configPath = Config.GetWord();
+    }
+    else if (userName == "" && strcmp(var, RADOS_CONFIG_USER) == 0)
+    {
+      userName = Config.GetWord();
+    }
+    else if (strcmp(var, RADOS_CONFIG_POOLS_KW) == 0)
+    {
+      const char *pool;
+      while (pool = Config.GetWord())
+        AddPoolFromConfStr(pool);
+    }
+  }
+
+  Config.Close();
 }
 
+void
+RadosCms::AddPoolFromConfStr (const char *confStr)
+{
+  int delimeterIndex;
+  XrdOucString str(confStr);
+
+  delimeterIndex = str.find(':');
+  if (delimeterIndex == STR_NPOS || delimeterIndex == 0 ||
+      delimeterIndex == str.length() - 1)
+  {
+    RadosCmsError.Emsg("Error splitting the pool conf str", confStr);
+    return;
+  }
+
+  RadosCmsPool pool = {""};
+  XrdOucString poolPrefix(str, 0, delimeterIndex - 1);
+  XrdOucString poolName(str, delimeterIndex + 1);
+
+  pool.name = poolName.c_str();
+
+  RadosCmsError.Say(LOG_PREFIX "Found pool with name ", poolName.c_str(),
+                    " for prefix ", poolPrefix.c_str());
+
+  mPoolMap[poolPrefix.c_str()] = pool;
+  mPoolPrefixSet.insert(poolPrefix.c_str());
+}
 
 //------------------------------------------------------------------------------
 // Locate
@@ -225,7 +304,7 @@ RadosCms::RefreshOsdMap ()
 bool
 RadosCms::DumpOsdMap ()
 {
-  RadosCmsError.Emsg("DumpOsdMap","refreshing the OSD map");
+  RadosCmsError.Emsg("DumpOsdMap", "refreshing the OSD map");
 
   std::string lOsDump = "ceph --id ";
   lOsDump += mRadosUser;
