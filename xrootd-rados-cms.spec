@@ -15,7 +15,7 @@ BuildRequires: ceph-libs ceph-devel
 BuildRequires: xrootd-server-devel >= 3.3.0
 BuildRequires: xrootd-private-devel >= 3.3.0
 
-Requires:      ceph-libs
+Requires:      ceph-libs ceph
 
 
 %description
