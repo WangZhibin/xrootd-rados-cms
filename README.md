@@ -17,11 +17,11 @@ line to the server's configuration file:
   ofs.cmslib /path/to/libRadosCms.so
 
 It is necessary to tell which Ceph cluster it should interface with. This is done
-by adding the following file to the same configuration file indicated above:
+by adding the following line to the same configuration file indicated above:
 
   radoscms.config /path/to/your/ceph.conf
 
-The Rados CMNS plug-in maps pools with object names' prefixes. Thus, it is possible
+The Rados CMS plug-in maps pools with object names' prefixes. Thus, it is possible
 to configure which prefixes point to which pools by setting the *radoscms.pools*
 variable in the configuration file similar to the following example:
 
@@ -31,3 +31,5 @@ If you need the Rados instance to be created with a specific user name, you can 
 it in the following way (myusername is an existing user name):
 
   radososs.user myusername
+
+The default name is 'admin'.
