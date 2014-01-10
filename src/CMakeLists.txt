@@ -21,7 +21,8 @@ find_package( LibRados REQUIRED )
 include_directories( ./  
 		     ${RADOS_INCLUDE_DIR} 
 		     ${XROOTD_INCLUDE_DIR} 
-		     ${XROOTD_PRIVATE_INCLUDE_DIR} )
+		     ${XROOTD_PRIVATE_INCLUDE_DIR} 
+           ceph/src/)
 
 link_directories( ${RADOS_LIB_DIR} )
 

@@ -62,6 +62,11 @@ CONFIGURE_FILE(
 ADD_CUSTOM_TARGET(uninstall
   "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/cmake_uninstall.cmake") 
 
+#-------------------------------------------------------------------------------
+# 'ceph' target
+#-------------------------------------------------------------------------------
+
+ADD_CUSTOM_TARGET(ceph COMMAND ../git.checkout.ceph)
 
 #-------------------------------------------------------------------------------
 # 'gitdist' target
@@ -75,10 +80,12 @@ add_custom_target(gitdist
 # 'srpm' target
 #-------------------------------------------------------------------------------
 ADD_CUSTOM_TARGET(srpm COMMAND rpmbuild -ts ${CMAKE_PROJECT_NAME}-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${RELEASE}.tar.gz)
-ADD_DEPENDENCIES(srpm gitdist)
+ADD_DEPENDENCIES(srpm gitdist ceph)
 
 #-------------------------------------------------------------------------------
 # 'rpm' target
 #-------------------------------------------------------------------------------
 ADD_CUSTOM_TARGET(rpm COMMAND rpmbuild -tb ${CMAKE_PROJECT_NAME}-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${RELEASE}.tar.gz)
-ADD_DEPENDENCIES(rpm gitdist)
+ADD_DEPENDENCIES(rpm gitdist ceph)
+
+

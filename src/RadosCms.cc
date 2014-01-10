@@ -50,7 +50,7 @@
 #define RADOS_CONFIG_POOLS_KW (RADOS_CMS_CONFIG_PREFIX ".pools")
 #define RADOS_CONFIG_USER (RADOS_CMS_CONFIG_PREFIX ".user")
 #define DEFAULT_POOL_PREFIX "/"
-#define LOG_PREFIX "--- Ceph Cms Rados --- "
+#define LOG_PREFIX "------ RadosCms ---- "
 
 // Singleton variable
 static XrdCmsClient* instance = NULL;
@@ -63,6 +63,7 @@ namespace XrdCms
   XrdOucTrace Trace (&RadosCmsError);
 };
 
+#include "RadosLocator.hh"
 //------------------------------------------------------------------------------
 // CMS Client Instantiator
 //------------------------------------------------------------------------------
@@ -86,17 +87,6 @@ extern "C"
 }
 
 //------------------------------------------------------------------------------
-// OsdMap Thread Start Function
-//------------------------------------------------------------------------------
-
-void*
-RadosCms::StaticOsdMapThread (void* arg)
-{
-  return reinterpret_cast<RadosCms*> (arg)->RefreshOsdMap();
-}
-
-
-//------------------------------------------------------------------------------
 // Constructor
 //------------------------------------------------------------------------------
 
@@ -107,9 +97,9 @@ mRedirPort (1094)
   RadosCmsError.logger(logger);
   mRoot.clear();
   mRedirHost.clear();
-  mOsdDumpFile = "/var/tmp/xrootd-rados-cms.osd.dump";
-  mRadosUser = "atlassfst";
-  mOsdMapThread = 0;
+  mRadosUser = "admin";
+  mCephCluster = 0;
+  mCephConf = "/etc/ceph/ceph.conf";
 }
 
 
@@ -119,13 +109,9 @@ mRedirPort (1094)
 
 RadosCms::~RadosCms ()
 {
-  if (mOsdMapThread)
-  {
-    XrdSysThread::Cancel(mOsdMapThread);
-    fprintf(stderr,"trying to join\n");
-    XrdSysThread::Join(mOsdMapThread, NULL);
-    mOsdMapThread = 0;
-  }
+  
+  if (mCephCluster)
+    rados_shutdown(mCephCluster);
 }
 
 
@@ -138,29 +124,72 @@ RadosCms::Configure (const char* cfn, char* params, XrdOucEnv* EnvInfo)
 {
   RadosCmsError.Emsg("Configure", "Init RadosCms plugin with params:", params);
 
-  std::string path;
-  std::string user;
-  int retc = !LoadConfig(cfn, path, user);
-  
+  int retc = !LoadConfig(cfn, mCephConf, mCephUser);
+
   if (!mPoolMap.size())
   {
-    RadosCmsError.Emsg("Configure", 
+    RadosCmsError.Emsg("Configure",
                        "your pool map is empty! Define 'radoscms.pools=...'");
     return 0;
   }
-  
-  XrdSysThread::Run(&mOsdMapThread,
-                    RadosCms::StaticOsdMapThread,
-                    static_cast<void *> (this),
-                    XRDSYSTHREAD_HOLD,
-                    "OsdMap Thread");
-  
-  return retc;
-  
+
+  retc = rados_create(&mCephCluster, mCephUser.c_str());
+
+  if (retc != 0)
+  {
+    RadosCmsError.Emsg("Problem when creating the cluster", strerror(-retc));
+    return 0;
+    ;
+  }
+
+  retc = rados_conf_read_file(mCephCluster, mCephConf.c_str());
+
+  if (retc != 0)
+  {
+    RadosCmsError.Emsg("Problem when reading Ceph's config file",
+                       mCephConf.c_str(), ":", strerror(-retc));
+    return 0;
+  }
+
+  retc = rados_connect(mCephCluster);
+
+  if (retc == 0 && mPoolMap.count(DEFAULT_POOL_PREFIX) == 0)
+  {
+    RadosCmsPool defaultPool = {GetDefaultPoolName()};
+    mPoolMap[DEFAULT_POOL_PREFIX] = defaultPool;
+    mPoolPrefixSet.insert(DEFAULT_POOL_PREFIX);
+
+    RadosCmsError.Emsg("Got default pool name since none was configured",
+                       DEFAULT_POOL_PREFIX, "=", defaultPool.name.c_str());
+  }
+
+  InitIoctxInPools();
+
+  // do a test location
+  rados_ioctx_t ioctx;
+  std::string root = "/";
+
+  if (!GetIoctxFromPath(root,
+                        &ioctx))
+  {
+    std::vector<RadosLocator::location_t> root_locations;
+    RadosLocator::Locate(ioctx, root.c_str(), root_locations);
+    std::string out;
+
+    for (size_t i = 0; i < root_locations.size(); i++)
+    {
+      out = "path=/ ";
+      out += root_locations[i].Dump();
+      RadosCmsError.Say(LOG_PREFIX, out.c_str());
+    }
+  }
+
+  return 1;
+
 }
 
 //------------------------------------------------------------------------------
-// LoadCOnfig
+// LoadConfig
 //------------------------------------------------------------------------------
 
 int
@@ -171,9 +200,6 @@ RadosCms::LoadConfig (const char *pluginConf,
   XrdOucStream Config;
   int cfgFD;
   char *var;
-
-  configPath = "";
-  userName = "";
 
   if ((cfgFD = open(pluginConf, O_RDONLY, 0)) < 0)
     return cfgFD;
@@ -198,7 +224,47 @@ RadosCms::LoadConfig (const char *pluginConf,
   }
 
   Config.Close();
+  return 0;
 }
+
+//------------------------------------------------------------------------------
+// GetDefaultPoolName
+//------------------------------------------------------------------------------
+
+std::string
+RadosCms::GetDefaultPoolName () const
+{
+  const int poolListMaxSize = 1024;
+  char poolList[poolListMaxSize];
+  rados_pool_list(mCephCluster, poolList, poolListMaxSize);
+
+  return poolList;
+}
+
+void
+RadosCms::InitIoctxInPools ()
+{
+  std::map<std::string, RadosCmsPool>::iterator it = mPoolMap.begin();
+
+  while (it != mPoolMap.end())
+  {
+    const std::string &key = (*it).first;
+    RadosCmsPool &pool = (*it).second;
+    int res = rados_ioctx_create(mCephCluster, pool.name.c_str(), &pool.ioctx);
+
+    it++;
+
+    if (res != 0)
+    {
+      RadosCmsError.Emsg("Problem creating pool from name",
+                         pool.name.c_str(), strerror(-res));
+      mPoolMap.erase(key);
+    }
+  }
+}
+//------------------------------------------------------------------------------
+// AddPoolFromConfStr
+//------------------------------------------------------------------------------
 
 void
 RadosCms::AddPoolFromConfStr (const char *confStr)
@@ -225,6 +291,45 @@ RadosCms::AddPoolFromConfStr (const char *confStr)
 
   mPoolMap[poolPrefix.c_str()] = pool;
   mPoolPrefixSet.insert(poolPrefix.c_str());
+}
+
+//------------------------------------------------------------------------------
+// GetPoolFromPath
+//------------------------------------------------------------------------------
+
+const RadosCmsPool*
+RadosCms::GetPoolFromPath (const std::string &path)
+{
+std:
+  set<std::string>::reverse_iterator it;
+  for (it = mPoolPrefixSet.rbegin(); it != mPoolPrefixSet.rend(); it++)
+  {
+    if (path.compare(0, (*it).length(), *it) == 0)
+      return &mPoolMap[*it];
+  }
+
+  return 0;
+}
+
+//------------------------------------------------------------------------------
+// GetIoctxFromPath
+//------------------------------------------------------------------------------
+
+int
+RadosCms::GetIoctxFromPath (const std::string &objectName,
+                            rados_ioctx_t *ioctx)
+{
+  const RadosCmsPool *pool = GetPoolFromPath(objectName);
+
+  if (!pool)
+  {
+    RadosCmsError.Emsg("No pool was found for object name", objectName.c_str());
+    return -ENODEV;
+  }
+
+  *ioctx = pool->ioctx;
+
+  return 0;
 }
 
 //------------------------------------------------------------------------------
@@ -276,104 +381,5 @@ RadosCms::Space (XrdOucErrInfo& Resp,
   // Will return the space in the attached RADOS pool
   //............................................................................
   return 0;
-}
-
-//------------------------------------------------------------------------------
-// Refresh OsdMap
-//------------------------------------------------------------------------------
-
-void*
-RadosCms::RefreshOsdMap ()
-{
-  XrdSysTimer sleeper;
-  while (1)
-  {
-    XrdSysThread::SetCancelOff();
-    DumpOsdMap();
-    XrdSysThread::SetCancelOn();
-    sleeper.Wait(10000);
-  }
-  return 0;
-}
-
-
-//------------------------------------------------------------------------------
-// DumpOsdMap
-//------------------------------------------------------------------------------
-
-bool
-RadosCms::DumpOsdMap ()
-{
-  RadosCmsError.Emsg("DumpOsdMap", "refreshing the OSD map");
-
-  std::string lOsDump = "ceph --id ";
-  lOsDump += mRadosUser;
-  lOsDump += " osd dump | grep \"osd\\.\" > ";
-  lOsDump += mOsdDumpFile;
-
-  int rc = system(lOsDump.c_str());
-  if (WEXITSTATUS(rc))
-  {
-    fprintf(stderr, "error: <%s> failed with retc=%d",
-            lOsDump.c_str(),
-            WEXITSTATUS(rc));
-    return false;
-  }
-
-  // load the current osd configuration into a string
-  std::string lOsdConfig = "";
-  {
-    std::ifstream load(mOsdDumpFile.c_str());
-    std::stringstream buffer;
-
-    buffer << load.rdbuf();
-    lOsdConfig = buffer.str();
-  }
-
-  // parse the configuration into the OsdMap
-  XrdOucTokenizer tokenizer((char*) lOsdConfig.c_str());
-
-  while (tokenizer.GetLine())
-  {
-    XrdOucString osd = tokenizer.GetToken();
-    osd.replace("osd.", "");
-    errno = 0;
-    uint64_t id = strtoull(osd.c_str(), 0, 10);
-    if (!errno)
-    {
-      mOsdMap_tmp[id].mId = id;
-      mOsdMap_tmp[id].mActive = tokenizer.GetToken();
-      mOsdMap_tmp[id].mState = tokenizer.GetToken();
-      XrdOucString tag = tokenizer.GetToken();
-      if (tag == "weight")
-      {
-        XrdOucString weight = tokenizer.GetToken();
-        mOsdMap_tmp[id].mWeight = atof(weight.length() ? weight.c_str() : "");
-      }
-      const char* val = 0;
-      while (val = tokenizer.GetToken())
-      {
-        XrdOucString ip = val;
-        int pos = 0;
-        if ((pos = ip.find(":")) != STR_NPOS)
-        {
-          ip.erase(pos);
-          mOsdMap_tmp[id].mIp = ip.c_str();
-          break;
-        }
-      }
-    }
-    fprintf(stderr, "     # OSD[ %04d ] active=%-10s state=%-10s weight=%.02f ip=[%s]\n",
-            id,
-            mOsdMap_tmp[id].mActive.c_str(),
-            mOsdMap_tmp[id].mState.c_str(),
-            mOsdMap_tmp[id].mWeight,
-            mOsdMap_tmp[id].mIp.c_str());
-
-    // assign the new OSD map
-    XrdSysMutexHelper lLock(mOsdMapMutex);
-    mOsdMap = mOsdMap_tmp;
-  }
-  return true;
 }
 

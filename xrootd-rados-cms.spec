@@ -10,6 +10,7 @@ License:	GNU General Public License as published by the Free Software Foundation
 Source:        %{name}-%{version}-%{release}.tar.gz
 BuildRoot:     %{_tmppath}/%{name}-root
 
+BuildRequires: git
 BuildRequires: cmake >= 2.6
 BuildRequires: ceph-libs ceph-devel
 BuildRequires: xrootd-server-devel >= 3.3.0

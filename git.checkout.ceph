@@ -1,0 +1,11 @@
+#!/bin/bash
+( 
+  if [ ! -e ../src/ceph ]; then  
+    cd src/
+    git clone https://github.com/ceph/ceph.git
+  fi
+  cd ../src/ceph
+  git checkout dumpling
+  touch acconfig.h
+)
+
